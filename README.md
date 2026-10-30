@@ -100,6 +100,21 @@ without the dashboard instead of crashing.
 Beep patterns: HIGH is three beeps, CRITICAL is three alternating
 high/low pairs.
 
+## Testing
+
+Tests use only the standard library (`unittest`):
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+They cover the brute-force threshold and sliding window, the per-IP
+cooldown, the login-after-flag CRITICAL rule, Wazuh counting vs.
+standalone alerts (including the min-level cutoff and malformed-line
+skipping), and the dashboard page rendering. No network, audio, or log
+files are needed — the detector and parser are tested directly, and the
+Wazuh demo path replays a temporary alerts file.
+
 ## Roadmap
 
 - More rules (e.g. new-country logins, off-hours admin logins)
