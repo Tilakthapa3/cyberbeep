@@ -10,14 +10,40 @@ nothing leaves the machine it runs on.
 Sound is one notification channel, not the product: every alert is also
 printed and logged, so a machine with no audio still works.
 
-## Rules (step 1)
+## Rules (steps 1–3)
 
 | Alert | Severity | Trigger |
 |---|---|---|
-| `ssh_brute_force` | HIGH | 5+ failed logins from one IP within 5 minutes (one alert per IP per 15-minute cooldown, so a sustained attack doesn't become a beep loop) |
+| `ssh_brute_force` | HIGH | 5+ failed logins from one IP within 5 minutes, from the syslog and/or Wazuh (one alert per IP per 15-minute cooldown, so a sustained attack doesn't become a beep loop) |
 | `login_after_brute_force` | CRITICAL | A successful login from an IP that was previously flagged — a brute force that suddenly succeeds is the incident that matters most |
+| `wazuh_alert` | From rule level | Any other Wazuh alert at or above `--wazuh-min-level` (default 10): level ≥13 CRITICAL, 10–12 HIGH, 7–9 MEDIUM, below that LOW |
 
 Thresholds are flags: `--threshold`, `--window`, `--cooldown`.
+
+## Wazuh input (step 3)
+
+Point CyberBeep at a Wazuh manager's alert file and it tails it
+alongside (or instead of) the syslog:
+
+```bash
+python cyberbeep.py --wazuh /var/ossec/logs/alerts/alerts.json
+python cyberbeep.py /var/log/auth.log --wazuh /var/ossec/logs/alerts/alerts.json
+```
+
+How it works, honestly: it reads Wazuh's single-line JSON records from
+`alerts.json` and keys on rule *groups* and *level*, never on rule IDs,
+which vary between Wazuh versions and rulesets. Alerts in the
+authentication-failure groups feed the same brute-force counting as the
+syslog lines (a source IP is read from `srcip`, falling back to
+`data.srcip`), so the same attack seen through both sources counts once
+per IP — and Wazuh's own correlation rules don't double-beep. A
+successful-login alert for a flagged IP escalates to CRITICAL the same
+way. Anything else at or above `--wazuh-min-level` (default 10) becomes
+its own `wazuh_alert` incident. Malformed JSON lines are skipped and
+counted, never fatal.
+
+`--demo` replays both bundled samples, including one malformed Wazuh
+line that gets skipped.
 
 ## Try it in 30 seconds (no logs, no setup)
 
@@ -27,7 +53,9 @@ python cyberbeep.py --demo
 
 This replays `examples/sample_auth.log`: an attacker IP fails 5 times
 (HIGH beep), then logs in successfully (CRITICAL beep), while a second
-IP with only 2 failures correctly stays silent. Alerts land in
+IP with only 2 failures correctly stays silent. It then replays
+`examples/sample_wazuh_alerts.jsonl`: five Wazuh auth-failure alerts
+from one IP (HIGH beep) plus a level-10 Wazuh rule alert. Alerts land in
 `incidents.jsonl`:
 
 ```json
@@ -74,8 +102,8 @@ high/low pairs.
 
 ## Roadmap
 
-- Wazuh alert-file input as a second event source
 - More rules (e.g. new-country logins, off-hours admin logins)
+- Optional email/webhook notifications for CRITICAL alerts
 
 ## Disclaimer
 
