@@ -1,0 +1,11 @@
+Oct 30 02:00:01 server sshd[101]: Failed password for invalid user admin from 203.0.113.45 port 51234 ssh2
+Oct 30 02:00:12 server sshd[102]: Failed password for invalid user admin from 203.0.113.45 port 51235 ssh2
+Oct 30 02:00:23 server sshd[103]: Failed password for root from 203.0.113.45 port 51236 ssh2
+Oct 30 02:00:31 server sshd[104]: Failed password for invalid user test from 203.0.113.45 port 51237 ssh2
+Oct 30 02:00:44 server sshd[105]: Failed password for root from 203.0.113.45 port 51238 ssh2
+Oct 30 02:00:58 server sshd[106]: Failed password for root from 203.0.113.45 port 51239 ssh2
+Oct 30 02:01:10 server sshd[107]: Accepted password for deploy from 203.0.113.45 port 51240 ssh2
+Oct 30 02:02:05 server CRON[200]: (root) CMD (run-parts /etc/cron.hourly)
+Oct 30 02:03:11 server sshd[108]: Failed password for invalid user guest from 198.51.100.7 port 44100 ssh2
+Oct 30 02:03:40 server sshd[109]: Failed password for invalid user guest from 198.51.100.7 port 44101 ssh2
+Oct 30 02:04:02 server sshd[110]: Disconnected from authenticating user root 203.0.113.45 port 51241 [preauth]
