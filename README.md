@@ -46,6 +46,21 @@ python cyberbeep.py --no-sound /var/log/auth.log  # print + log only
 It tails the file, so new lines are checked as they arrive. If the log
 rotates or shrinks, it restarts from the top instead of stalling.
 
+## Live dashboard
+
+Add `--dashboard` to serve a live page on http://127.0.0.1:8080/
+(`--port` changes the port). It shows recent incidents and per-IP
+failure counts, refreshes every 5 seconds, and binds localhost only —
+nothing is exposed to the network.
+
+```bash
+python cyberbeep.py /var/log/auth.log --dashboard
+python cyberbeep.py --demo --dashboard   # replay, then keep the page up
+```
+
+If the port is already taken, it prints a warning and keeps watching
+without the dashboard instead of crashing.
+
 ## Sound
 
 - Windows: built-in `winsound` beeps.
@@ -59,7 +74,6 @@ high/low pairs.
 
 ## Roadmap
 
-- Live dashboard (incidents + per-IP counts, served locally)
 - Wazuh alert-file input as a second event source
 - More rules (e.g. new-country logins, off-hours admin logins)
 

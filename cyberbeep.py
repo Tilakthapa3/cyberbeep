@@ -5,10 +5,14 @@ Watches an auth-style log (e.g. /var/log/auth.log), flags brute-force
 patterns, plays a severity beep, prints the alert, and records every
 incident as one JSON object per line in incidents.jsonl.
 
+With --dashboard it also serves a live page on http://127.0.0.1:8080/
+showing recent incidents and per-IP counts. The page refreshes itself
+every 5 seconds and never leaves the machine: it binds localhost only.
+
 Standard library only. No network access, no credentials, nothing leaves
 the machine it runs on.
 
-Rules (step 1):
+Rules (steps 1-2):
   - ssh_brute_force (HIGH): >= threshold failed logins from one IP inside
     the window. One alert per IP per cooldown, so a sustained attack does
     not become a beep loop.
@@ -20,14 +24,17 @@ Sound is one notification channel, not the product: every alert is also
 printed and logged, so a machine with no audio still works fine.
 
 Usage:
-  python cyberbeep.py --demo            # replay the bundled sample log
-  python cyberbeep.py /var/log/auth.log # watch a real log (needs read access)
-  python cyberbeep.py --no-sound        # print + log only
+  python cyberbeep.py --demo                       # replay the sample log
+  python cyberbeep.py --demo --dashboard           # replay, then keep the
+                                                   # dashboard up to view it
+  python cyberbeep.py /var/log/auth.log --dashboard
+  python cyberbeep.py --no-sound                   # print + log only
 
 Only monitor logs you own or have permission to monitor.
 """
 
 import argparse
+import html as htmlmod
 import json
 import math
 import os
@@ -37,10 +44,12 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import wave
 from collections import defaultdict, deque
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 FAILED_RE = re.compile(
     r"Failed password for (?:invalid user )?\S+ from (\d+\.\d+\.\d+\.\d+)"
@@ -152,8 +161,13 @@ class Detector:
         self.cooldown = cooldown
         self.failures = defaultdict(deque)
         self.flagged = {}  # ip -> epoch of last HIGH alert
+        self._lock = threading.Lock()
 
     def observe(self, line, now):
+        with self._lock:
+            return self._observe_locked(line, now)
+
+    def _observe_locked(self, line, now):
         m = FAILED_RE.search(line)
         if m:
             ip = m.group(1)
@@ -176,6 +190,124 @@ class Detector:
                     "ip": ip,
                     "detail": "Successful login from a previously flagged IP"}
         return None
+
+    def snapshot(self):
+        """Copy of per-IP state for the dashboard (thread-safe)."""
+        with self._lock:
+            return {
+                ip: {"failures_in_window": len(dq),
+                     "flagged": ip in self.flagged}
+                for ip, dq in self.failures.items()
+            }
+
+
+# ------------------------------------------------------------- dashboard
+
+def _read_incidents(path, limit=50):
+    try:
+        with open(path) as f:
+            rows = []
+            for line in f:
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+            return rows[-limit:][::-1]
+    except FileNotFoundError:
+        return []
+
+
+def _render_page(watched, stats, snap, incidents):
+    esc = htmlmod.escape
+    sev_class = {"HIGH": "high", "CRITICAL": "critical",
+                 "MEDIUM": "medium", "LOW": "low"}
+    if incidents:
+        rows = []
+        for r in incidents:
+            if r.get("type") == "ssh_brute_force":
+                det = (f"{r.get('count')} failures in "
+                       f"{r.get('window_seconds')}s")
+            else:
+                det = str(r.get("detail", ""))
+            rows.append(
+                "<tr><td>{ts}</td><td><span class='badge {cls}'>{sev}</span></td>"
+                "<td>{typ}</td><td>{ip}</td><td>{det}</td></tr>".format(
+                    ts=esc(str(r.get("timestamp", ""))),
+                    cls=sev_class.get(r.get("severity"), ""),
+                    sev=esc(str(r.get("severity", ""))),
+                    typ=esc(str(r.get("type", ""))),
+                    ip=esc(str(r.get("ip", ""))),
+                    det=esc(det)))
+        incident_rows = "".join(rows)
+    else:
+        incident_rows = ("<tr><td colspan='5'>No incidents yet — "
+                         "alerts will appear here as they happen.</td></tr>")
+    if snap:
+        ip_rows = "".join(
+            "<tr><td>{ip}</td><td>{n}</td><td>{flag}</td></tr>".format(
+                ip=esc(ip),
+                n=v["failures_in_window"],
+                flag="yes" if v["flagged"] else "no")
+            for ip, v in sorted(snap.items()))
+    else:
+        ip_rows = ("<tr><td colspan='3'>No failed logins seen yet.</td></tr>")
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="5">
+<title>CyberBeep Live</title>
+<style>
+body {{ font-family: system-ui, sans-serif; margin: 2em; color: #111; }}
+table {{ border-collapse: collapse; margin-bottom: 2em; }}
+td, th {{ border: 1px solid #ccc; padding: 6px 10px; text-align: left; }}
+.badge {{ padding: 2px 8px; border-radius: 10px; color: #fff; font-size: 0.85em; }}
+.high {{ background: #e67e00; }} .critical {{ background: #c00; }}
+.medium {{ background: #d4a017; }} .low {{ background: #2a7; }}
+</style></head><body>
+<h1>CyberBeep Live</h1>
+<p>Watching: {esc(watched)} &nbsp;|&nbsp; Lines processed: {stats['lines']}
+&nbsp;|&nbsp; Alerts: {stats['alerts']} &nbsp;|&nbsp; Auto-refreshes every 5s</p>
+<h2>Recent incidents</h2>
+<table><tr><th>Time</th><th>Severity</th><th>Type</th><th>IP</th><th>Detail</th></tr>
+{incident_rows}</table>
+<h2>Per-IP failures in window</h2>
+<table><tr><th>IP</th><th>Failures</th><th>Flagged</th></tr>
+{ip_rows}</table>
+</body></html>"""
+
+
+def _make_handler(detector, incident_file, stats, watched):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            if self.path != "/":
+                self.send_error(404)
+                return
+            page = _render_page(watched, stats, detector.snapshot(),
+                                _read_incidents(incident_file))
+            data = page.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    return Handler
+
+
+def start_dashboard(detector, incident_file, stats, watched, port):
+    """Start the localhost dashboard in a daemon thread (None if it fails)."""
+    try:
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", port),
+            _make_handler(detector, incident_file, stats, watched))
+    except OSError as e:
+        print(f"[dashboard unavailable on port {port}: {e}]", file=sys.stderr)
+        return None
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f"Dashboard: http://127.0.0.1:{port}/")
+    return server
 
 
 # ------------------------------------------------------------------ main
@@ -237,6 +369,10 @@ def main():
                     help="auth-style log to watch (default: demo sample)")
     ap.add_argument("--demo", action="store_true",
                     help="replay examples/sample_auth.log instead of tailing")
+    ap.add_argument("--dashboard", action="store_true",
+                    help="serve the live dashboard on localhost")
+    ap.add_argument("--port", type=int, default=8080,
+                    help="dashboard port (default 8080)")
     ap.add_argument("--threshold", type=int, default=5,
                     help="failed logins from one IP that trigger HIGH (default 5)")
     ap.add_argument("--window", type=int, default=5,
@@ -258,11 +394,22 @@ def main():
     try:
         if args.demo or not args.logfile:
             sample = os.path.join(here, "examples", "sample_auth.log")
+            if args.dashboard:
+                start_dashboard(detector, args.incidents, stats,
+                                sample + " (demo replay)", args.port)
             run_demo(sample, detector, beeper, args.incidents, stats)
+            if args.dashboard:
+                # Keep serving the replay results until stopped.
+                print("Dashboard still running — Ctrl+C to stop.")
+                while True:
+                    time.sleep(1)
         else:
             if not os.path.exists(args.logfile):
                 print(f"No such file: {args.logfile}", file=sys.stderr)
                 return 2
+            if args.dashboard:
+                start_dashboard(detector, args.incidents, stats,
+                                args.logfile, args.port)
             run_tail(args.logfile, detector, beeper, args.incidents, stats)
     except KeyboardInterrupt:
         print()
